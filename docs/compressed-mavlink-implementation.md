@@ -275,7 +275,7 @@ CompressedMavlinkDecoder.h/cpp  — compressed frame → reconstructed MAVLink p
 - Roundtrip: encode → decode → compare (attitude keyframe, attitude delta, position)
 - Error: invalid stream index
 
-### Phase 2 — Priority scheduler (~1 day)
+### Phase 2 — Priority scheduler
 
 **Not yet implemented.** Currently the encoder produces a frame for every
 message fed to it. The scheduler adds:
@@ -294,7 +294,7 @@ test_scheduler_bandwidth.cpp    — verify low-priority dropped under pressure
 test_scheduler_priority.cpp     — verify critical streams never dropped
 ```
 
-### Phase 3 — RX MAVLink parser + encoder integration (~1 day)
+### Phase 3 — RX MAVLink parser + encoder integration
 
 The encoder takes `(msgid, payload)` but `SerialMavlink.processBytes()`
 currently receives raw bytes. Need to parse MAVLink frame headers to
@@ -332,7 +332,7 @@ mavlinkInputBuffer.popBytes(payloadData + 3, count);
 
 Must compile for ESP8285 target. Verify with `pio run -e <rx_target>`.
 
-### Phase 4 — TX decoder integration (~1 day)
+### Phase 4 — TX decoder integration
 
 Wire decoder into the TX telemetry receive path. When a
 `CRSF_FRAMETYPE_ARDUPILOT_RESP` frame arrives:
@@ -360,7 +360,7 @@ if (frame_type == CRSF_FRAMETYPE_ARDUPILOT_RESP)
 
 Must compile for ESP32 TX target. Verify with `pio run -e <tx_target>`.
 
-### Phase 5 — End-to-end software test (~1 day)
+### Phase 5 — End-to-end software test
 
 Full-path test using a synthetic MAVLink tlog file as the source,
 with a bandwidth limiter simulating OTA constraints:
@@ -393,7 +393,7 @@ struct OTASimConfig {
 - No buffer overflow (encoder output fits within mavlinkInputBuffer)
 - Compression ratio within 10% of the estimate (~5× overall)
 
-### Phase 6 — Hardware validation (~2 days)
+### Phase 6 — Hardware validation
 
 1. Flash modified RX firmware to a test ESP8285 receiver
 2. Flash modified TX firmware to a test ESP32 TX module
@@ -404,7 +404,7 @@ struct OTASimConfig {
 7. Test at range (attenuator or physical distance) to verify behaviour
    under degraded link with priority-based stream shedding
 
-### Phase 7 — Uplink path (~1 day)
+### Phase 7 — Uplink path
 
 Same codec in reverse for ground → vehicle commands:
 
