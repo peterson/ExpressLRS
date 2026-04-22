@@ -258,130 +258,170 @@ Ample headroom for mission upload and parameter management.
 
 ## Implementation phases
 
-### Phase 1 — Codec library + unit tests (~3 days)
+### Phase 1 — Codec library + unit tests ✅ DONE
 
-New: `src/lib/CompressedMavlink/`
-
-```
-CompressedMavlinkDefs.h         — frame types, profile enums, constants
-CompressedMavlinkStream.h       — stream_entry_t, scale factor tables per profile
-CompressedMavlinkEncoder.h/cpp  — MAVLink bytes → compressed frame
-CompressedMavlinkDecoder.h/cpp  — compressed frame → MAVLink bytes
-CompressedMavlinkScheduler.h/cpp — priority scheduler, rate adaptation
-```
-
-**Encoder:**
-```cpp
-class CompressedMavlinkEncoder {
-public:
-    void init();
-    bool encode(uint32_t msgid, const uint8_t *payload, uint8_t payload_len,
-                uint8_t *out_buf, uint8_t *out_len, uint32_t now_ms);
-    void resetAllStreams();
-    void setBandwidth(uint16_t bytes_per_second);
-};
-```
-
-**Decoder:**
-```cpp
-class CompressedMavlinkDecoder {
-public:
-    void init();
-    bool decode(const uint8_t *compressed, uint8_t compressed_len,
-                uint8_t *mavlink_out, uint8_t *mavlink_len);
-    uint8_t requestKeyframe(uint8_t stream_index);
-};
-```
-
-**Tests** (PlatformIO `native`, runs on host):
+`src/lib/CompressedMavlink/`:
 
 ```
-test_encoder.cpp      — encode known messages, verify output
-test_decoder.cpp      — decode frames, verify MAVLink reconstruction
-test_roundtrip.cpp    — encode → decode → compare (fuzz with random payloads)
-test_delta.cpp        — per-message delta verification with known field changes
-test_profiles.cpp     — verify SEDATE vs AGGRESSIVE scale factors produce
-                        int8 for typical dynamics, int16 for extreme
-test_scheduler.cpp    — priority ordering, rate adaptation under pressure
-test_bandwidth.cpp    — simulated OTA rates, verify output stays within budget
+CompressedMavlinkDefs.h         — frame types, scale factors, stream table struct, all constants named
+CompressedMavlinkEncoder.h/cpp  — MAVLink (msgid + payload) → compressed frame
+CompressedMavlinkDecoder.h/cpp  — compressed frame → reconstructed MAVLink payload
 ```
 
-### Phase 2 — RX integration (~2 days)
+15 TDD tests passing (`pio test -e native -f test_compressed_mavlink`):
+- Encoder: init, keyframe generation, heartbeat always-keyframe, unknown msgid rejection
+- Delta: single field, multiple fields, int16 promotion, position, zero-delta suppression
+- Keyframe: interval forcing (2s), reset forcing
+- Roundtrip: encode → decode → compare (attitude keyframe, attitude delta, position)
+- Error: invalid stream index
 
-Insert encoder into `SerialMavlink.processBytes()`:
+### Phase 2 — Priority scheduler (~1 day)
+
+**Not yet implemented.** Currently the encoder produces a frame for every
+message fed to it. The scheduler adds:
+
+- Per-stream rate tracking (last_sent_ms, current_rate_hz)
+- Bandwidth budget: track total bytes/s produced, compare with `m_bandwidth`
+- Rate decimation: if over budget, reduce medium/low priority streams first
+- Drop policy: priority 3 streams dropped entirely when budget <50%
+- `setBandwidth()` already exists on the encoder; scheduler logic goes in `encode()`
+  before the keyframe/delta decision
+
+New test cases needed:
+```
+test_scheduler_rate_limit.cpp   — verify streams respect nominal rate
+test_scheduler_bandwidth.cpp    — verify low-priority dropped under pressure
+test_scheduler_priority.cpp     — verify critical streams never dropped
+```
+
+### Phase 3 — RX MAVLink parser + encoder integration (~1 day)
+
+The encoder takes `(msgid, payload)` but `SerialMavlink.processBytes()`
+currently receives raw bytes. Need to parse MAVLink frame headers to
+extract msgid and payload before feeding the encoder.
+
+The existing `mavlink_frame_char()` parser (from pymavlink C library,
+already used in `sendQueuedData()`) can be reused:
 
 ```cpp
-void SerialMavlink::processBytes(uint8_t *bytes, uint16_t size)
-{
-    // Parse complete MAVLink frames from raw bytes
-    for each complete MAVLink message:
+// In processBytes() — replace raw FIFO push with parse + encode
+for (uint8_t i = 0; i < size; i++) {
+    mavlink_message_t msg;
+    mavlink_status_t status;
+    if (mavlink_frame_char(MAVLINK_COMM_0, bytes[i], &msg, &status)
+        == MAVLINK_FRAMING_OK)
+    {
         uint8_t compressed[64];
         uint8_t compressed_len;
-        if (encoder.encode(msgid, payload, payload_len,
+        if (encoder.encode(msg.msgid, _MAV_PAYLOAD(&msg), msg.len,
                            compressed, &compressed_len, millis()))
         {
             mavlinkInputBuffer.atomicPushBytes(compressed, compressed_len);
         }
+    }
 }
 ```
 
-`GetNextPayload()` wraps with sub-type 0x01:
+`GetNextPayload()` modification — prepend sub-type 0x01:
 ```cpp
 payloadData[0] = CRSF_ADDRESS_USB;
-payloadData[1] = count + 1;         // +1 for sub-type byte
-payloadData[2] = 0x01;              // compressed MAVLink sub-type
+payloadData[1] = count + 1;
+payloadData[2] = CMAV_SUBTYPE_COMPRESSED;  // 0x01
 mavlinkInputBuffer.popBytes(payloadData + 3, count);
 ```
 
-### Phase 3 — TX integration (~2 days)
+Must compile for ESP8285 target. Verify with `pio run -e <rx_target>`.
 
-Decoder in TX telemetry receive path:
+### Phase 4 — TX decoder integration (~1 day)
+
+Wire decoder into the TX telemetry receive path. When a
+`CRSF_FRAMETYPE_ARDUPILOT_RESP` frame arrives:
 
 ```cpp
 if (frame_type == CRSF_FRAMETYPE_ARDUPILOT_RESP)
 {
-    if (payload[0] == 0x01)  // compressed
+    if (payload_len > 0 && payload[0] == CMAV_SUBTYPE_COMPRESSED)
     {
         uint8_t mavlink_buf[MAVLINK_MAX_PACKET_LEN];
         uint8_t mavlink_len;
         if (decoder.decode(payload + 1, payload_len - 1,
                            mavlink_buf, &mavlink_len))
         {
+            // Reconstruct full MAVLink frame (add header, CRC) and forward
             forwardReconstructedMavlink(mavlink_buf, mavlink_len);
         }
     }
-    else  // 0x00 = raw passthrough (backward compatible)
+    else  // sub-type 0x00 or missing = raw passthrough (backward compatible)
     {
         forwardRawMavlink(payload, payload_len);
     }
 }
 ```
 
-### Phase 4 — End-to-end software test (~2 days)
+Must compile for ESP32 TX target. Verify with `pio run -e <tx_target>`.
+
+### Phase 5 — End-to-end software test (~1 day)
+
+Full-path test using a synthetic MAVLink tlog file as the source,
+with a bandwidth limiter simulating OTA constraints:
 
 ```
-  [Skylight tlog]  →  Encoder  →  BW Limiter  →  Decoder  →  Compare
-                                  (simulates OTA)
+[tlog file] → MAVLink parser → Encoder → BW Limiter → Decoder → Compare
+                                              (simulates OTA)
 ```
 
-Test matrix:
+**Bandwidth limiter** simulates OTA by limiting throughput:
+```cpp
+struct OTASimConfig {
+    uint8_t  payload_per_packet;  // 5 (OTA4) or 10 (OTA8)
+    uint16_t rf_rate_hz;          // 50, 150, 250, 500
+    uint8_t  tlm_ratio;           // 2, 4, 8
+};
+```
+
+**Test matrix** (run all combinations):
 - OTA4 @ 50 Hz, 1:2 (125 B/s) — worst case
 - OTA8 @ 150 Hz, 1:4 (375 B/s) — typical
 - OTA8 @ 250 Hz, 1:4 (625 B/s) — good
 - OTA8 @ 500 Hz, 1:2 (2500 B/s) — best case
 
-Each rate tested with both SEDATE and AGGRESSIVE profiles.
-
 **Pass criteria:**
-- Priority 0: 0% loss at all rates
-- Priority 1: <5% loss at 150+ Hz, <20% at 50 Hz
-- Priority 2: <10% loss at 250+ Hz
-- Decoded field values within 1 scale-factor unit of original
-- No buffer overflow
+- Priority 0 messages: 0% loss at all rates
+- Priority 1 messages: <5% loss at 150+ Hz, <20% loss at 50 Hz
+- Priority 2 messages: <10% loss at 250+ Hz
+- All decoded field values within 1 scale-factor unit of original
+- No buffer overflow (encoder output fits within mavlinkInputBuffer)
+- Compression ratio within 10% of the estimate (~5× overall)
 
-### Phase 5 — Hardware validation (~3 days)
+### Phase 6 — Hardware validation (~2 days)
 
-Flash modified firmware, test with SITL → ELRS RX → OTA → ELRS TX → Skylight.
+1. Flash modified RX firmware to a test ESP8285 receiver
+2. Flash modified TX firmware to a test ESP32 TX module
+3. Connect RX to ArduPilot SITL via USB-serial adapter
+4. Connect TX to GCS via USB-serial
+5. Verify: SITL → RX → OTA → TX → GCS shows vehicle telemetry
+6. Measure real compression ratios, compare with software simulation
+7. Test at range (attenuator or physical distance) to verify behaviour
+   under degraded link with priority-based stream shedding
+
+### Phase 7 — Uplink path (~1 day)
+
+Same codec in reverse for ground → vehicle commands:
+
+- TX-side encoder compresses COMMAND_LONG (33 B → ~12 B as keyframe),
+  PARAM_SET, MISSION_ITEM_INT before OTA transmission
+- RX-side decoder reconstructs and forwards to FC via UART
+- Windowing protocol: encoder pauses streaming telemetry for 100-200 ms,
+  bursts mission items with per-item ACK, resumes
+- Mission upload estimate: 100 waypoints at ~5 items/sec through the
+  compressed link = ~20 seconds at 250 Hz OTA8
+
+New test cases:
+```
+test_uplink_command.cpp    — encode/decode COMMAND_LONG roundtrip
+test_uplink_mission.cpp    — encode/decode MISSION_ITEM_INT sequence
+test_uplink_params.cpp     — encode/decode PARAM_SET/PARAM_VALUE pair
+```
 
 ---
 

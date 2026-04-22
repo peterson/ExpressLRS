@@ -2,7 +2,7 @@
 
 **Branch:** `compressed-mavlink`
 **Status:** Design / not yet implemented
-**Related:** [Skylight compressed-mavlink-elrs.md](https://github.com/peterson/skylight/blob/main/docs/plans/compressed-mavlink-elrs.md)
+**Related:** Design originated from MAVLink-over-ELRS bandwidth analysis for multi-UAS GCS applications.
 
 ---
 
@@ -157,7 +157,8 @@ Requires maintaining the fork against upstream ELRS releases.
 Start with Option B for validation. Contribute upstream if the ELRS project
 is receptive. Fall back to Option A if maintaining the fork is impractical.
 
-## Relationship to Skylight
+## Relationship to GCS software
 
-Skylight receives standard MAVLink from the ground-side TX module. The
-compression is fully transparent to Phoenix — no Skylight changes required.
+Any MAVLink GCS (QGroundControl, Mission Planner, or custom) receives
+standard MAVLink from the ground-side TX module. The compression is fully
+transparent — no GCS changes required.
