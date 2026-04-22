@@ -210,25 +210,49 @@ Default table:
 
 ---
 
-## Bandwidth budget
+## Bandwidth savings — raw vs compressed
+
+Per-message comparison at nominal stream rates:
+
+| Message | Rate | Raw (with MAVLink header) | Compressed (delta + KF amortised) | Reduction |
+|---|---|---|---|---|
+| HEARTBEAT | 1 Hz | 17 B × 1 = 17 B/s | 11 B × 1 = 11 B/s | 35% (always KF) |
+| ATTITUDE | 10 Hz | 40 B × 10 = 400 B/s | 6 B × 9.5 + 26 B × 0.5 = 70 B/s | **82%** |
+| GLOBAL_POSITION_INT | 5 Hz | 40 B × 5 = 200 B/s | 7 B × 4.5 + 26 B × 0.5 = 45 B/s | **78%** |
+| SYS_STATUS | 2 Hz | 43 B × 2 = 86 B/s | 4 B × 1.5 + 12 B × 0.5 = 12 B/s | 86% |
+| VFR_HUD | 2 Hz | 32 B × 2 = 64 B/s | 5 B × 1.5 + 22 B × 0.5 = 19 B/s | 70% |
+| GPS_RAW_INT | 1 Hz | 42 B × 1 = 42 B/s | 10 B × 1 = 10 B/s | 76% |
+| **Total** | | **~809 B/s** | **~167 B/s** | **~79% (5× compression)** |
+
+Keyframe amortisation: keyframes sent every 2 s (0.5 Hz) per stream. The
+remaining frames are deltas. Delta sizes are typical for straight-and-level
+flight; turns and manoeuvres produce slightly larger deltas but still
+well within int8 range for most fields.
+
+## Bandwidth budget by OTA configuration
 
 ### 250 Hz OTA8, 1:4 TLM ratio (~625 B/s available)
 
-| Stream | Compressed size | Rate | B/s |
-|---|---|---|---|
-| HEARTBEAT | 10 B KF | 1 Hz | 10 |
-| ATTITUDE | 6 B delta, 29 B KF | 10 Hz (0.5 Hz KF) | 75 |
-| GLOBAL_POSITION_INT | 7 B delta, 29 B KF | 5 Hz (0.5 Hz KF) | 50 |
-| SYS_STATUS | 4 B delta | 2 Hz (0.5 Hz KF) | 13 |
-| VFR_HUD | 5 B delta | 2 Hz (0.5 Hz KF) | 15 |
-| GPS_RAW_INT | 4 B delta | 1 Hz (0.2 Hz KF) | 10 |
-| **Total** | | | **~173 B/s** |
-| **Headroom** | | | **~450 B/s** |
+| | B/s |
+|---|---|
+| Compressed telemetry (all 6 streams) | ~167 |
+| Headroom for STATUSTEXT, params, missions | ~458 |
+| **Total available** | **625** |
+
+### 150 Hz OTA8, 1:4 ratio (~375 B/s)
+
+Full telemetry stream fits (167 B/s) with 208 B/s headroom.
 
 ### 50 Hz OTA4, 1:2 ratio (~125 B/s — worst case)
 
-Drop to: HEARTBEAT (10) + ATTITUDE 4 Hz (28) + POSITION 2 Hz (18) +
-SYS_STATUS 0.5 Hz (4) = **~60 B/s**. Still fits.
+Drop medium-priority streams and reduce rates:
+HEARTBEAT 1 Hz (11) + ATTITUDE 4 Hz (28) + POSITION 2 Hz (18) +
+SYS_STATUS 0.5 Hz (4) = **~61 B/s**. Fits with 64 B/s headroom.
+
+### 500 Hz OTA8, 1:2 ratio (~2500 B/s — best case)
+
+Full telemetry with rate increases: ATTITUDE at 20 Hz, POSITION at 10 Hz.
+Ample headroom for mission upload and parameter management.
 
 ---
 
