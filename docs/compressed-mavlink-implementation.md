@@ -64,100 +64,68 @@ CRSF max payload: 62 bytes (keyframes must fit within this).
 
 ---
 
-## Scale factor profiles
+## Scale factors
 
 The delta encoding uses per-field scale factors to map expected inter-frame
-changes into int8 (±127). The "right" scale factor depends on vehicle
-dynamics — an FPV racing quad changes attitude 10× faster than a survey
-fixed-wing. Using too-small scale factors wastes bandwidth on int16
-promotions; too-large sacrifices precision.
+changes into int8 (±127). A single set of scale factors covers all vehicle
+types from survey fixed-wing to FPV racing quad. The factors are sized for
+worst-case dynamics (aggressive manoeuvres) — sedate vehicles simply produce
+smaller delta values, which is fine. If a future use case needs tighter
+precision for slow vehicles (e.g. camera georeferencing on a survey platform),
+a second profile can be added; the codec structure supports it.
 
-### Profile selection
-
-Two built-in profiles, selected at subscription time (hardcoded initially,
-negotiable later via handshake):
-
-| Profile | Use case | Attitude slew | Position slew | Typical vehicle |
-|---|---|---|---|---|
-| `SEDATE` | Survey, inspection, patrol | ≤5°/s roll/pitch, ≤15°/s yaw | ≤30 m/s, ≤3 m/s climb | Fixed-wing UAS, large multirotor |
-| `AGGRESSIVE` | FPV racing, acro, rapid manoeuvre | ≤500°/s roll, ≤200°/s pitch/yaw | ≤50 m/s, ≤15 m/s climb | Racing quad, acro copter |
-
-### ATTITUDE (msgid 30) — scale factors by profile
+### ATTITUDE (msgid 30) — 6 delta-encodable fields
 
 At 10 Hz (100 ms between frames):
 
-| Field | SEDATE scale | SEDATE int8 range | AGGRESSIVE scale | AGGRESSIVE int8 range |
+| Field | Type | Scale | int8 range per delta | Rationale |
 |---|---|---|---|---|
-| roll | 0.001 rad/unit | ±7.3° per delta | 0.01 rad/unit | ±73° per delta |
-| pitch | 0.001 rad/unit | ±7.3° | 0.01 rad/unit | ±73° |
-| yaw | 0.005 rad/unit | ±36° | 0.02 rad/unit | ±146° |
-| rollspeed | 0.002 rad/s/unit | ±14.5°/s | 0.05 rad/s/unit | ±364°/s |
-| pitchspeed | 0.002 rad/s/unit | ±14.5°/s | 0.05 rad/s/unit | ±364°/s |
-| yawspeed | 0.002 rad/s/unit | ±14.5°/s | 0.02 rad/s/unit | ±146°/s |
+| roll | float | 0.01 rad/unit | ±73° | 500°/s snap roll = 50°/frame = 88 units, fits int8 |
+| pitch | float | 0.01 rad/unit | ±73° | Same as roll |
+| yaw | float | 0.02 rad/unit | ±146° | Rate-1 turn: 0.3°/frame = ~0.3 units. Fast yaw: 200°/s = 20°/frame = 17 units |
+| rollspeed | float | 0.05 rad/s/unit | ±364°/s | Covers full acro range |
+| pitchspeed | float | 0.05 rad/s/unit | ±364°/s | Same |
+| yawspeed | float | 0.02 rad/s/unit | ±146°/s | Same |
 
-**SEDATE rationale:** A fixed-wing in a rate-1 turn (3°/s) changes heading
-by 0.3° per 100 ms frame. Scale factor 0.005 rad/unit = 0.29°/unit → the
-delta is ~1 unit, fitting comfortably in int8. Roll/pitch changes in cruise
-are <0.5°/frame — again fits int8 trivially. Int16 promotion only triggers
-during aggressive manoeuvres (wind gusts, turbulence recovery).
+`time_boot_ms` excluded from delta encoding — implicit from frame timing.
 
-**AGGRESSIVE rationale:** An FPV quad doing a snap roll can hit 500°/s.
-At 10 Hz that's 50°/frame. Scale factor 0.01 rad/unit = 0.57°/unit →
-50°/0.57 = 88 units, still fits int8. A 720°/s snap roll would promote
-to int16 — acceptable for an extreme manoeuvre that lasts <1 second.
-
-### GLOBAL_POSITION_INT (msgid 33) — scale factors by profile
+### GLOBAL_POSITION_INT (msgid 33) — 8 delta-encodable fields
 
 At 5 Hz (200 ms between frames):
 
-| Field | SEDATE scale | SEDATE int8 range | AGGRESSIVE scale | AGGRESSIVE int8 range |
+| Field | Type | Scale | int8 range per delta | Rationale |
 |---|---|---|---|---|
-| lat (degE7) | 10 /unit | ±14 m | 30 /unit | ±42 m |
-| lon (degE7) | 10 /unit | ±11 m (lat 35°) | 30 /unit | ±33 m |
-| alt (mm) | 100 /unit | ±12.7 m | 500 /unit | ±63.5 m |
-| relative_alt (mm) | 100 /unit | ±12.7 m | 500 /unit | ±63.5 m |
-| vx (cm/s) | 1 /unit | ±1.27 m/s | 5 /unit | ±6.35 m/s |
-| vy (cm/s) | 1 /unit | ±1.27 m/s | 5 /unit | ±6.35 m/s |
-| vz (cm/s) | 1 /unit | ±1.27 m/s | 10 /unit | ±12.7 m/s |
-| hdg (cdeg) | 10 /unit | ±12.7° | 50 /unit | ±63.5° |
+| lat | int32 (degE7) | 30 /unit | ±42 m | 50 m/s = 10 m/frame = 3 units |
+| lon | int32 (degE7) | 30 /unit | ±33 m (lat 35°) | Same |
+| alt | int32 (mm) | 500 /unit | ±63.5 m | 15 m/s climb = 3 m/frame = 6 units |
+| relative_alt | int32 (mm) | 500 /unit | ±63.5 m | Same |
+| vx | int16 (cm/s) | 5 /unit | ±6.35 m/s | Covers acceleration transients |
+| vy | int16 (cm/s) | 5 /unit | ±6.35 m/s | Same |
+| vz | int16 (cm/s) | 10 /unit | ±12.7 m/s | Aggressive dive: 15 m/s Δ = 150 units → int16 promotion |
+| hdg | uint16 (cdeg) | 50 /unit | ±63.5° | Fast turn: 20°/frame = 4 units |
 
-**SEDATE rationale:** At 30 m/s ground speed, position changes by 6 m per
-200 ms frame. Scale factor 10 degE7/unit → 6 m / 1.1 m/unit = ~5 units.
-Fits int8. Velocity in cruise is nearly constant — delta is typically 0.
-Altitude in level flight changes <0.5 m/frame (noise only).
+`time_boot_ms` excluded.
 
-**AGGRESSIVE rationale:** At 50 m/s with 5 g pull-up, altitude can change
-by 15 m per frame. Scale 500 mm/unit → 15000/500 = 30 units, fits int8.
-A racing quad in a dive at 40 m/s vertical: vz changes by ~15 m/s per frame
-at 10 Hz — scale 10 cm/s/unit → 1500/10 = 150, promotes to int16. Acceptable
-for a transient that lasts <2 seconds.
+### SYS_STATUS (msgid 1) — 4 delta-encodable fields
 
-### SYS_STATUS (msgid 1) — same for both profiles
-
-Battery and system health change slowly regardless of vehicle dynamics:
-
-| Field | Scale | Range |
-|---|---|---|
-| voltage_battery (mV) | 10 /unit | ±1.27 V |
-| current_battery (cA) | 1 /unit | ±1.27 A |
-| battery_remaining (%) | 1 /unit | ±127% (always fits) |
-| load (‰) | 10 /unit | ±1.27 (always fits) |
-
-### Quantisation error analysis
-
-The worst-case quantisation error per field is half the scale factor:
-
-| Profile | Field | Scale | Max error | Acceptable? |
+| Field | Type | Scale | int8 range | Rationale |
 |---|---|---|---|---|
-| SEDATE | roll | 0.001 rad | 0.0005 rad (0.03°) | GPS heading accuracy is ~0.5° |
-| SEDATE | lat | 10 degE7 | 5 degE7 (0.55 m) | GPS accuracy is ~2 m |
-| SEDATE | alt | 100 mm | 50 mm (5 cm) | Baro accuracy is ~0.5 m |
-| AGGRESSIVE | roll | 0.01 rad | 0.005 rad (0.29°) | OSD resolution is ~1° |
-| AGGRESSIVE | lat | 30 degE7 | 15 degE7 (1.65 m) | GPS accuracy is ~2 m |
-| AGGRESSIVE | alt | 500 mm | 250 mm (25 cm) | Acceptable for FPV |
+| voltage_battery | uint16 (mV) | 10 /unit | ±1.27 V | Changes slowly |
+| current_battery | int16 (cA) | 1 /unit | ±1.27 A | Same |
+| battery_remaining | int8 (%) | 1 /unit | ±127% | Direct fit |
+| load | uint16 (‰) | 10 /unit | ±1.27 | Same |
 
-All errors are well within sensor accuracy. Keyframes every 2 seconds reset
-any accumulated drift.
+### Quantisation error
+
+Worst-case error per field = half the scale factor. All well within sensor accuracy:
+
+| Field | Scale | Max error | Sensor accuracy |
+|---|---|---|---|
+| roll/pitch | 0.01 rad | 0.29° | Gyro ~0.01°, but GPS heading ~0.5° |
+| lat/lon | 30 degE7 | 1.65 m | GPS ~2 m |
+| alt | 500 mm | 25 cm | Baro ~0.5 m |
+
+Keyframes every 2 seconds reset any accumulated quantisation drift.
 
 ---
 
@@ -177,8 +145,7 @@ Compressed payload (after sub-type byte):
   [1] stream_index
   [1] frame_flags — bit 7: keyframe(1) / delta(0)
                      bit 6: has_promotion_bits
-                     bits 4-5: profile (0=SEDATE, 1=AGGRESSIVE)
-                     bits 0-3: reserved
+                     bits 0-5: reserved
   [N] frame body (keyframe or delta, see below)
 ```
 
@@ -208,14 +175,9 @@ Compressed payload (after sub-type byte):
 ## Stream subscription table
 
 ```c
-#define MAX_STREAMS          8
+#define MAX_STREAMS           8
 #define MAX_FIELDS_PER_STREAM 8
-#define LAST_VALUES_BUF_SIZE 64
-
-typedef enum : uint8_t {
-    PROFILE_SEDATE     = 0,
-    PROFILE_AGGRESSIVE = 1,
-} slew_profile_t;
+#define LAST_VALUES_BUF_SIZE  64
 
 typedef struct {
     uint8_t       stream_index;
@@ -230,22 +192,21 @@ typedef struct {
     uint32_t      last_keyframe_ms;
     uint32_t      last_sent_ms;
     uint8_t       last_values[LAST_VALUES_BUF_SIZE];
-    slew_profile_t profile;
 } stream_entry_t;
 ```
 
 Default table:
 
-| Index | Message | Priority | Rate | KF interval | Profile |
-|---|---|---|---|---|---|
-| 0 | HEARTBEAT | 0 | 1 Hz | always KF | — |
-| 1 | ATTITUDE | 1 | 10 Hz | 2 s | configurable |
-| 2 | GLOBAL_POSITION_INT | 1 | 5 Hz | 2 s | configurable |
-| 3 | SYS_STATUS | 2 | 2 Hz | 2 s | — |
-| 4 | VFR_HUD | 2 | 2 Hz | 2 s | configurable |
-| 5 | GPS_RAW_INT | 2 | 1 Hz | 5 s | — |
-| 6 | STATUSTEXT | 0 | event | always KF | — |
-| 7 | COMMAND_ACK | 0 | event | always KF | — |
+| Index | Message | Priority | Rate | KF interval |
+|---|---|---|---|---|
+| 0 | HEARTBEAT | 0 | 1 Hz | always KF |
+| 1 | ATTITUDE | 1 | 10 Hz | 2 s |
+| 2 | GLOBAL_POSITION_INT | 1 | 5 Hz | 2 s |
+| 3 | SYS_STATUS | 2 | 2 Hz | 2 s |
+| 4 | VFR_HUD | 2 | 2 Hz | 2 s |
+| 5 | GPS_RAW_INT | 2 | 1 Hz | 5 s |
+| 6 | STATUSTEXT | 0 | event | always KF |
+| 7 | COMMAND_ACK | 0 | event | always KF |
 
 ---
 
@@ -289,12 +250,11 @@ CompressedMavlinkScheduler.h/cpp — priority scheduler, rate adaptation
 ```cpp
 class CompressedMavlinkEncoder {
 public:
-    void init(slew_profile_t profile = PROFILE_SEDATE);
+    void init();
     bool encode(uint32_t msgid, const uint8_t *payload, uint8_t payload_len,
                 uint8_t *out_buf, uint8_t *out_len, uint32_t now_ms);
     void resetAllStreams();
     void setBandwidth(uint16_t bytes_per_second);
-    void setProfile(slew_profile_t profile);  // update scale factors
 };
 ```
 
